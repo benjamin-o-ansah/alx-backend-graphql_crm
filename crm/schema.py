@@ -1,6 +1,5 @@
 import re
 from decimal import Decimal
-from typing import List, Optional
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -35,43 +34,53 @@ class OrderType(DjangoObjectType):
 
 
 # ----------------------------
-# Helpers: Validation
+# Validation helpers
 # ----------------------------
 PHONE_REGEX = re.compile(r"^(\+\d{7,15}|\d{3}-\d{3}-\d{4})$")  # +1234567890 OR 123-456-7890
 
 
-def _validate_phone(phone: Optional[str]) -> None:
-    if phone is None or phone == "":
+def validate_phone(phone: str | None) -> None:
+    if not phone:
         return
     if not PHONE_REGEX.match(phone):
         raise ValidationError("Invalid phone format. Use +1234567890 or 123-456-7890.")
 
 
-def _validate_unique_email(email: str) -> None:
-    # Validate basic email format first (clean error message)
+def validate_unique_email(email: str) -> None:
     try:
         validate_email(email)
     except ValidationError:
         raise ValidationError("Invalid email format.")
 
-    # Enforce uniqueness at app level (still keep DB unique=True ideally)
     if Customer.objects.filter(email__iexact=email).exists():
         raise ValidationError("Email already exists.")
 
 
 # ----------------------------
-# Inputs / Error Types
+# Input types
 # ----------------------------
-class CustomerInput(graphene.InputObjectType):
+class CreateCustomerInput(graphene.InputObjectType):
     name = graphene.String(required=True)
     email = graphene.String(required=True)
     phone = graphene.String(required=False)
 
 
-class BulkCustomerErrorType(graphene.ObjectType):
-    index = graphene.Int(required=True)          # position in the input list
-    email = graphene.String()                    # may be null if missing/invalid
-    message = graphene.String(required=True)
+class BulkCustomerInput(graphene.InputObjectType):
+    name = graphene.String(required=True)
+    email = graphene.String(required=True)
+    phone = graphene.String(required=False)
+
+
+class CreateProductInput(graphene.InputObjectType):
+    name = graphene.String(required=True)
+    price = graphene.Decimal(required=True)
+    stock = graphene.Int(required=False)
+
+
+class CreateOrderInput(graphene.InputObjectType):
+    customer_id = graphene.ID(required=True, name="customerId")
+    product_ids = graphene.List(graphene.ID, required=True, name="productIds")
+    order_date = graphene.DateTime(required=False, name="orderDate")
 
 
 # ----------------------------
@@ -79,27 +88,33 @@ class BulkCustomerErrorType(graphene.ObjectType):
 # ----------------------------
 class CreateCustomer(graphene.Mutation):
     class Arguments:
-        name = graphene.String(required=True)
-        email = graphene.String(required=True)
-        phone = graphene.String(required=False)
+        input = CreateCustomerInput(required=True)
 
     customer = graphene.Field(CustomerType)
-    message = graphene.String()
+    message = graphene.String(required=True)
 
     @staticmethod
-    def mutate(root, info, name: str, email: str, phone: Optional[str] = None):
+    def mutate(root, info, input: CreateCustomerInput):
         try:
-            _validate_unique_email(email)
-            _validate_phone(phone)
+            name = input.name.strip()
+            email = input.email.strip()
+            phone = input.phone.strip() if input.phone else None
 
-            customer = Customer(name=name.strip(), email=email.strip(), phone=(phone.strip() if phone else None))
-            customer.save()
+            if not name:
+                raise ValidationError("Name is required.")
+            if not email:
+                raise ValidationError("Email is required.")
+
+            validate_unique_email(email)
+            validate_phone(phone)
+
+            customer = Customer.objects.create(name=name, email=email, phone=phone)
             return CreateCustomer(customer=customer, message="Customer created successfully.")
+
         except ValidationError as e:
-            # User-friendly GraphQL error
-            raise GraphQLError(str(e.messages[0] if hasattr(e, "messages") else e))
+            raise GraphQLError(e.messages[0] if hasattr(e, "messages") else str(e))
         except IntegrityError:
-            # In case the DB unique constraint triggers (race conditions)
+            # Handles DB uniqueness race conditions
             raise GraphQLError("Email already exists.")
         except Exception:
             raise GraphQLError("Failed to create customer. Please try again.")
@@ -107,134 +122,121 @@ class CreateCustomer(graphene.Mutation):
 
 class BulkCreateCustomers(graphene.Mutation):
     """
-    Partial success supported:
-    - Valid records are created
-    - Invalid records are skipped
-    - Returns created_customers + errors (per item)
-    - Uses one outer transaction + per-item savepoints
+    Checkpoint expects:
+      bulkCreateCustomers(input: [ ... ]) { customers { ... } errors }
+
+    We'll return:
+      customers: list of created customers
+      errors: list of strings (simple + checkpoint-friendly)
     """
     class Arguments:
-        customers = graphene.List(CustomerInput, required=True)
+        input = graphene.List(BulkCustomerInput, required=True)
 
-    created_customers = graphene.List(CustomerType, required=True)
-    errors = graphene.List(BulkCustomerErrorType, required=True)
-    message = graphene.String()
+    customers = graphene.List(CustomerType, required=True)
+    errors = graphene.List(graphene.String, required=True)
 
     @staticmethod
-    def mutate(root, info, customers: List[CustomerInput]):
-        created: List[Customer] = []
-        errors: List[BulkCustomerErrorType] = []
+    def mutate(root, info, input):
+        created = []
+        errors = []
 
-        if not customers:
-            return BulkCreateCustomers(
-                created_customers=[],
-                errors=[BulkCustomerErrorType(index=0, email=None, message="Customer list cannot be empty.")],
-                message="No customers created.",
-            )
+        if not input:
+            return BulkCreateCustomers(customers=[], errors=["Input list cannot be empty."])
 
         with transaction.atomic():
-            for idx, c in enumerate(customers):
-                sp_id = transaction.savepoint()
+            for idx, c in enumerate(input):
+                sp = transaction.savepoint()
                 try:
-                    name = (c.name or "").strip()
-                    email = (c.email or "").strip()
-                    phone = (c.phone or "").strip() if c.phone else None
+                    name = c.name.strip()
+                    email = c.email.strip()
+                    phone = c.phone.strip() if c.phone else None
 
                     if not name:
                         raise ValidationError("Name is required.")
                     if not email:
                         raise ValidationError("Email is required.")
 
-                    _validate_unique_email(email)
-                    _validate_phone(phone)
+                    validate_unique_email(email)
+                    validate_phone(phone)
 
-                    obj = Customer(name=name, email=email, phone=phone)
-                    obj.save()
+                    obj = Customer.objects.create(name=name, email=email, phone=phone)
                     created.append(obj)
+                    transaction.savepoint_commit(sp)
 
-                    transaction.savepoint_commit(sp_id)
                 except ValidationError as e:
-                    transaction.savepoint_rollback(sp_id)
-                    msg = str(e.messages[0] if hasattr(e, "messages") else e)
-                    errors.append(BulkCustomerErrorType(index=idx, email=getattr(c, "email", None), message=msg))
-                except IntegrityError:
-                    transaction.savepoint_rollback(sp_id)
-                    errors.append(BulkCustomerErrorType(index=idx, email=getattr(c, "email", None), message="Email already exists."))
-                except Exception:
-                    transaction.savepoint_rollback(sp_id)
-                    errors.append(BulkCustomerErrorType(index=idx, email=getattr(c, "email", None), message="Unexpected error creating this customer."))
+                    transaction.savepoint_rollback(sp)
+                    msg = e.messages[0] if hasattr(e, "messages") else str(e)
+                    errors.append(f"Row {idx}: {msg}")
 
-        msg = "Customers created successfully." if created else "No customers created."
-        return BulkCreateCustomers(created_customers=created, errors=errors, message=msg)
+                except IntegrityError:
+                    transaction.savepoint_rollback(sp)
+                    errors.append(f"Row {idx}: Email already exists.")
+
+                except Exception:
+                    transaction.savepoint_rollback(sp)
+                    errors.append(f"Row {idx}: Unexpected error.")
+
+        return BulkCreateCustomers(customers=created, errors=errors)
 
 
 class CreateProduct(graphene.Mutation):
     class Arguments:
-        name = graphene.String(required=True)
-        price = graphene.Decimal(required=True)
-        stock = graphene.Int(required=False)
+        input = CreateProductInput(required=True)
 
     product = graphene.Field(ProductType)
 
     @staticmethod
-    def mutate(root, info, name: str, price, stock: Optional[int] = 0):
+    def mutate(root, info, input: CreateProductInput):
         try:
-            name = name.strip()
+            name = input.name.strip()
             if not name:
                 raise ValidationError("Product name is required.")
 
-            # Graphene Decimal arrives as Decimal-compatible; normalize:
-            price = Decimal(str(price))
+            price = Decimal(str(input.price))
             if price <= 0:
                 raise ValidationError("Price must be a positive number.")
 
-            if stock is None:
-                stock = 0
+            stock = 0 if input.stock is None else int(input.stock)
             if stock < 0:
                 raise ValidationError("Stock cannot be negative.")
 
-            product = Product(name=name, price=price, stock=stock)
-            product.save()
+            product = Product.objects.create(name=name, price=price, stock=stock)
             return CreateProduct(product=product)
+
         except ValidationError as e:
-            raise GraphQLError(str(e.messages[0] if hasattr(e, "messages") else e))
+            raise GraphQLError(e.messages[0] if hasattr(e, "messages") else str(e))
         except Exception:
             raise GraphQLError("Failed to create product. Please try again.")
 
 
 class CreateOrder(graphene.Mutation):
     class Arguments:
-        customer_id = graphene.ID(required=True)
-        product_ids = graphene.List(graphene.ID, required=True)
-        order_date = graphene.DateTime(required=False)
+        input = CreateOrderInput(required=True)
 
     order = graphene.Field(OrderType)
 
     @staticmethod
-    def mutate(root, info, customer_id, product_ids: List, order_date=None):
+    def mutate(root, info, input: CreateOrderInput):
         try:
-            if not product_ids or len(product_ids) == 0:
+            customer_id = input.customer_id
+            product_ids = input.product_ids or []
+            order_date = input.order_date or timezone.now()
+
+            if not product_ids:
                 raise ValidationError("At least one product must be selected.")
 
-            # Validate customer
             try:
                 customer = Customer.objects.get(pk=customer_id)
             except Customer.DoesNotExist:
                 raise ValidationError("Invalid customer ID.")
 
-            # Validate products (ensure all exist)
             products = list(Product.objects.filter(pk__in=product_ids))
             found_ids = {str(p.id) for p in products}
             missing = [str(pid) for pid in product_ids if str(pid) not in found_ids]
             if missing:
-                # user-friendly message showing the first missing (or list them)
                 raise ValidationError(f"Invalid product ID(s): {', '.join(missing)}")
 
-            # Determine date
-            if order_date is None:
-                order_date = timezone.now()
-
-            # Compute total_amount from DB product prices (source-of-truth)
+            # Accurate total from DB prices (source of truth)
             total_amount = sum((p.price for p in products), Decimal("0.00"))
 
             with transaction.atomic():
@@ -248,22 +250,22 @@ class CreateOrder(graphene.Mutation):
             return CreateOrder(order=order)
 
         except ValidationError as e:
-            raise GraphQLError(str(e.messages[0] if hasattr(e, "messages") else e))
+            raise GraphQLError(e.messages[0] if hasattr(e, "messages") else str(e))
         except Exception:
             raise GraphQLError("Failed to create order. Please try again.")
 
 
 # ----------------------------
-# Query + Mutation Root for crm
+# Schema entry points for import
 # ----------------------------
-class CRMQuery(graphene.ObjectType):
+class Query(graphene.ObjectType):
     hello = graphene.String()
 
     def resolve_hello(root, info):
         return "Hello, GraphQL!"
 
 
-class CRMMutation(graphene.ObjectType):
+class Mutation(graphene.ObjectType):
     create_customer = CreateCustomer.Field()
     bulk_create_customers = BulkCreateCustomers.Field()
     create_product = CreateProduct.Field()
