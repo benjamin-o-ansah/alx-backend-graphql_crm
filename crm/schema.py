@@ -112,6 +112,7 @@ class CreateCustomer(graphene.Mutation):
             validate_phone(phone)
 
             customer = Customer.objects.create(name=name, email=email, phone=phone)
+            customer.save()
             return CreateCustomer(customer=customer, message="Customer created successfully.")
 
         except ValidationError as e:
@@ -163,6 +164,7 @@ class BulkCreateCustomers(graphene.Mutation):
                     validate_phone(phone)
 
                     obj = Customer.objects.create(name=name, email=email, phone=phone)
+                    obj.save()
                     created.append(obj)
                     transaction.savepoint_commit(sp)
 
@@ -204,6 +206,7 @@ class CreateProduct(graphene.Mutation):
                 raise ValidationError("Stock cannot be negative.")
 
             product = Product.objects.create(name=name, price=price, stock=stock)
+            product.save()
             return CreateProduct(product=product)
 
         except ValidationError as e:
@@ -248,6 +251,7 @@ class CreateOrder(graphene.Mutation):
                     order_date=order_date,
                     total_amount=total_amount,
                 )
+                order.save()
                 order.products.set(products)
 
             return CreateOrder(order=order)
