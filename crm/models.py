@@ -12,20 +12,20 @@ class Customer(models.Model):
         return self.name
 
 
-# class Product(models.Model):
-#     name = models.CharField(max_length=255)
-#     price = models.DecimalField(max_digits=12, decimal_places=2)
-#     stock = models.PositiveIntegerField(default=0)
+class Product(models.Model):
+    name = models.CharField(max_length=255)
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    stock = models.PositiveIntegerField(default=0)
 
-#     def __str__(self) -> str:
-#         return self.name
+    def __str__(self) -> str:
+        return self.name
 
 
-# class Order(models.Model):
-#     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="orders")
-#     products = models.ManyToManyField(Product, related_name="orders")
-#     order_date = models.DateTimeField(auto_now_add=True)
-#     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+class Order(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="orders")
+    products = models.ManyToManyField(Product, related_name="orders")
+    order_date = models.DateTimeField(auto_now_add=True)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
 
-#     def __str__(self) -> str:
-#         return f"Order #{self.pk} for {self.customer.email}"
+    def __str__(self) -> str:
+        return f"Order #{self.pk} for {self.customer.email}"
