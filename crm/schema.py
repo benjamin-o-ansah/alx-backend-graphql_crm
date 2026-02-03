@@ -1,6 +1,6 @@
 import re
 from decimal import Decimal
-
+from crm.models import Customer
 import graphene
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
@@ -15,6 +15,9 @@ from crm.models import Customer, Product, Order
 # ----------------------------
 # GraphQL Types
 # ----------------------------
+
+customers = graphene.List(CustomerType)
+
 class CustomerType(DjangoObjectType):
     class Meta:
         model = Customer
