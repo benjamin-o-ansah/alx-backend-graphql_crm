@@ -9,6 +9,7 @@ from django.utils import timezone
 from graphene_django import DjangoObjectType
 from graphql import GraphQLError
 from graphene import relay
+from graphene_django.filter import DjangoFilterConnectionField
 
 from crm.models import Customer, Product, Order
 from crm.filters import CustomerFilter, ProductFilter, OrderFilter
@@ -24,6 +25,7 @@ class CustomerType(DjangoObjectType):
         model = Customer
         interfaces = (relay.Node,)
         fields = ("id", "name", "email", "phone")
+        filterset_class = CustomerFilter
 
 
 class ProductType(DjangoObjectType):
@@ -32,6 +34,7 @@ class ProductType(DjangoObjectType):
         model = Product
         interfaces = (relay.Node,)
         fields = ("id", "name", "price", "stock")
+        filterset_class = ProductFilter
 
 
 class OrderType(DjangoObjectType):
@@ -41,6 +44,7 @@ class OrderType(DjangoObjectType):
         model = Order
         interfaces = (relay.Node,)
         fields = ("id", "customer", "products", "order_date", "total_amount")
+        filterset_class = OrderFilter
 
     def resolve_product(self, info):
         # returns the first product (helps if checker/query expects `product`)
@@ -122,23 +126,27 @@ def _filter_queryset(filterset_cls, qs, data: dict):
 class Query(graphene.ObjectType):
     hello = graphene.String()
 
-    all_customers = relay.ConnectionField(
-        CustomerType.connection,
-        filter=CustomerFilterInput(),
-        order_by=graphene.String(name="orderBy"),
-    )
+    all_customers = DjangoFilterConnectionField(CustomerType)
+    all_products = DjangoFilterConnectionField(ProductType)
+    all_orders = DjangoFilterConnectionField(OrderType)
 
-    all_products = relay.ConnectionField(
-        ProductType.connection,
-        filter=ProductFilterInput(),
-        order_by=graphene.String(name="orderBy"),
-    )
+    # all_customers = relay.ConnectionField(
+    #     CustomerType.connection,
+    #     filter=CustomerFilterInput(),
+    #     order_by=graphene.String(name="orderBy"),
+    # )
 
-    all_orders = relay.ConnectionField(
-        OrderType.connection,
-        filter=OrderFilterInput(),
-        order_by=graphene.String(name="orderBy"),
-    )
+    # all_products = relay.ConnectionField(
+    #     ProductType.connection,
+    #     filter=ProductFilterInput(),
+    #     order_by=graphene.String(name="orderBy"),
+    # )
+
+    # all_orders = relay.ConnectionField(
+    #     OrderType.connection,
+    #     filter=OrderFilterInput(),
+    #     order_by=graphene.String(name="orderBy"),
+    # )
 
     def resolve_hello(root, info):
         return "Hello, GraphQL!"
